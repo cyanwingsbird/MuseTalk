@@ -16,7 +16,7 @@ import sys
 
 from musetalk.utils.blending import get_image
 from musetalk.utils.face_parsing import FaceParsing
-from musetalk.utils.audio_processor import AudioProcessor
+from musetalk.utils.audio_processor import AudioProcessor, parse_fps
 from musetalk.utils.utils import get_file_type, get_video_fps, datagen, load_all_model
 from musetalk.utils.preprocessing import get_landmark_and_bbox, read_imgs, coord_placeholder
 
@@ -260,7 +260,7 @@ if __name__ == "__main__":
     parser.add_argument("--bbox_shift", type=int, default=0, help="Bounding box shift value")
     parser.add_argument("--result_dir", default='./results', help="Directory for output results")
     parser.add_argument("--extra_margin", type=int, default=10, help="Extra margin for face cropping")
-    parser.add_argument("--fps", type=int, default=25, help="Video frames per second")
+    parser.add_argument("--fps", type=parse_fps, default=25, help="Positive video frame rate; fractions are allowed")
     parser.add_argument("--audio_padding_length_left", type=int, default=2, help="Left padding length for audio")
     parser.add_argument("--audio_padding_length_right", type=int, default=2, help="Right padding length for audio")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size for inference")

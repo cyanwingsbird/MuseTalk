@@ -1,0 +1,109 @@
+# Changes in this MuseTalk fork
+
+This document records changes relative to upstream MuseTalk commit
+[`0a89dec`](https://github.com/TMElyralab/MuseTalk/commit/0a89dec45a0192b824e3cf4daf96c239440c5ed8).
+Update it whenever fork-specific behavior, defaults, tests, or limitations change.
+The MuseTalk v1.5 model weights were not retrained for these changes.
+
+## Visual profiles for v1.5 normal inference
+
+On HPC, run inference inside an allocated GPU Slurm job, not on a login node.
+The following commands start inference and can be used within such a job.
+Choose a profile with the optional third argument:
+
+```sh
+sh inference.sh v1.5 normal original
+sh inference.sh v1.5 normal custom
+```
+
+`original` is the default for `inference.sh`; its v1.5 visual settings are the
+upstream defaults: `--parsing_mode jaw --extra_margin 10`. `custom` selects
+`--parsing_mode mouth --extra_margin 0`. The profile changes visual settings
+only: the fractional-FPS correction described below stays active in both.
+These examples use the existing configuration and model paths; choose suitable
+input and output locations before running inference.
+
+The custom profile writes to a new timestamped `results/test-custom-...`
+directory, keeping it separate from the upstream default output directory.
+
+Alternatively set `MUSE_VISUAL_PROFILE=original` or `custom` in the environment.
+An explicit third argument takes precedence. Unknown values fail rather than
+silently choosing a profile. The convenience `custom` profile is restricted to
+v1.5 normal inference, the path tested end to end. Existing two-argument v1.0
+and realtime uses retain their original visual settings.
+
+For direct `python -m scripts.inference` use, the two controls can be set
+independently using the existing flags:
+
+| Control | Upstream visual default | Fork option used in our sample |
+| --- | --- | --- |
+| Blending mask | `--parsing_mode jaw` | `--parsing_mode mouth` |
+| Extra lower crop margin | `--extra_margin 10` | `--extra_margin 0` |
+
+The margin is an existing MuseTalk option, not a change to the model. It changes
+the lower edge of the face crop used for generation and reconstruction. A zero
+margin is not guaranteed to be best for every face.
+
+### Mouth mask implementation
+
+`musetalk/utils/face_parsing/__init__.py` adds `mouth_alpha` and the optional
+`mouth` parsing mode. The existing face parser identifies the mouth and lips
+(classes 11, 12 and 13) in the source frame. Their bounds center a soft ellipse;
+the existing `jaw` mask is multiplied by the ellipse and passed through the
+upstream blending process. The goal is to retain more original chin pixels while
+using the generated mouth. If fewer than 10 mouth pixels are detected, the code
+falls back to `jaw`. The `jaw`, `raw`, and `neck` modes remain available.
+
+The source-derived mask can be inaccurate under occlusion, large generated mouth
+movements, profile views, or segmentation errors. Its center can also change
+between frames. The fallback can reintroduce the upstream chin artifact.
+Neither this mask nor the margin setting changes model weights or guarantees
+correct lips, synchronization, or temporal stability.
+
+## Fractional video FPS
+
+`musetalk/utils/audio_processor.py` retains the frame rate as a float when
+selecting Whisper audio chunks. Upstream converts it to an integer, which can
+accumulate alignment error for non-integer frame rates. This correction remains
+active for both visual profiles; `original` therefore means original **visual**
+settings, not a byte-for-byte reproduction of all upstream behavior. Normal
+video and realtime video inference use the source video frame rate automatically;
+realtime computes it separately for each source video unless `--fps` is supplied.
+If source FPS cannot be read (for example, when only cached avatar files remain),
+realtime warns and falls back to 25 fps; use the existing `--fps` to override it.
+Single images and frame directories have no inherent rate, so the default remains
+25 fps; the existing `--fps` argument can specify a finite positive decimal rate,
+for example `--fps 29.97`. Normal video inference continues to use the source
+rate rather than `--fps`. No new option is needed to enable the fix.
+This does not establish precise timing for variable-frame-rate video or prove
+synchronization for every input.
+
+## Testing and scope
+
+Run the CPU-only unit tests with the project dependencies installed:
+
+```sh
+CUDA_VISIBLE_DEVICES="" python3 -m unittest discover -s tests -p 'test_*.py'
+```
+
+The tests use synthetic data and do not load model weights or run inference.
+They cover profile selection, mouth-mask coverage and fallback, and integer and
+fractional audio-frame indexing.
+
+The mask comparison reused the same generated frames for one person. On a
+150-frame segment, mean source-relative difference in the selected chin region
+fell from about 4.88 to 2.94 on a 0-255 scale. This is not a visual quality or
+synchronization score. A complete 156-second sample was also produced with the
+custom mask and margin. Margin experiments on a second person did not establish
+a general improvement. Realtime and many poses, faces, and occlusions have not
+been validated end to end for these settings.
+
+Realtime avatars cache masks and coordinates: changing mask or margin requires
+preparing a separate avatar with the intended settings; reusing an old cache can
+retain the old result. Realtime is outside the convenience custom profile.
+
+## Release hygiene
+
+Input media, local environments and launchers, generated results, and accidental
+sample-media deletions are not required for these changes. Review the staged
+files before committing; model weights are not included.

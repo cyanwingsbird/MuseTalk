@@ -7,6 +7,21 @@ from PIL import Image
 from .model import BiSeNet
 import torchvision.transforms as transforms
 
+
+def mouth_alpha(parsing):
+    ys, xs = np.nonzero(np.isin(parsing, [11, 12, 13]))
+    if len(xs) < 10:
+        return None
+    cx, cy = (xs.min() + xs.max()) / 2, (ys.min() + ys.max()) / 2
+    # Source-frame lip bounds can miss extreme generated mouth movement.
+    rx = max(.18 * parsing.shape[1], .90 * (xs.max() - xs.min() + 1))
+    ry = max(.15 * parsing.shape[0], 1.10 * (ys.max() - ys.min() + 1))
+    yy, xx = np.ogrid[:parsing.shape[0], :parsing.shape[1]]
+    distance = np.sqrt(((xx - cx) / rx) ** 2 + ((yy - cy) / ry) ** 2)
+    ramp = np.clip((1 - distance) / .28, 0, 1)
+    return (ramp * ramp * (3 - 2 * ramp)).astype(np.float32)
+
+
 class FaceParsing():
     def __init__(self, left_cheek_width=80, right_cheek_width=80):
         self.net = self.model_init()
@@ -93,7 +108,8 @@ class FaceParsing():
             if mode == "neck":
                 parsing[np.isin(parsing, [1, 11, 12, 13, 14])] = 255
                 parsing[np.where(parsing!=255)] = 0
-            elif mode == "jaw":
+            elif mode in ("jaw", "mouth"):
+                alpha = mouth_alpha(parsing) if mode == "mouth" else None
                 face_region = np.isin(parsing, [1])*255
                 face_region = face_region.astype(np.uint8)
                 original_dilated = cv2.dilate(face_region, self.kernel, iterations=1)
@@ -103,6 +119,8 @@ class FaceParsing():
                 parsing[(face_region==255) & (~np.isin(parsing, [10]))] = 255         
                 parsing[np.isin(parsing, [11, 12, 13])] = 255
                 parsing[np.where(parsing!=255)] = 0
+                if alpha is not None:
+                    parsing = (parsing.astype(np.float32) * alpha).astype(np.uint8)
             else:
                 parsing[np.isin(parsing, [1, 11, 12, 13])] = 255
                 parsing[np.where(parsing!=255)] = 0

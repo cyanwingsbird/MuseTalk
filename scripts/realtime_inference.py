@@ -1,4 +1,5 @@
 import argparse
+import warnings
 import os
 from omegaconf import OmegaConf
 import numpy as np
@@ -13,11 +14,11 @@ import json
 from transformers import WhisperModel
 
 from musetalk.utils.face_parsing import FaceParsing
-from musetalk.utils.utils import datagen
+from musetalk.utils.utils import datagen, get_file_type, get_video_fps
 from musetalk.utils.preprocessing import get_landmark_and_bbox, read_imgs
 from musetalk.utils.blending import get_image_prepare_material, get_image_blending
 from musetalk.utils.utils import load_all_model
-from musetalk.utils.audio_processor import AudioProcessor
+from musetalk.utils.audio_processor import AudioProcessor, parse_fps
 
 import shutil
 import threading
@@ -51,6 +52,19 @@ def video2imgs(vid_path, save_path, ext='.png', cut_frame=10000000):
 def osmakedirs(path_list):
     for path in path_list:
         os.makedirs(path) if not os.path.exists(path) else None
+
+
+def resolve_realtime_fps(video_path, requested_fps):
+    # A video has its own frame rate; still images and frame folders do not.
+    if requested_fps is not None:
+        return requested_fps
+    if get_file_type(video_path) != "image" and not os.path.isdir(video_path):
+        try:
+            return parse_fps(get_video_fps(video_path))
+        except argparse.ArgumentTypeError:
+            warnings.warn("Could not read source FPS; using 25 fps. "
+                          "Use --fps to override when needed.", RuntimeWarning)
+    return 25
 
 
 @torch.no_grad()
@@ -325,7 +339,7 @@ if __name__ == "__main__":
     parser.add_argument("--bbox_shift", type=int, default=0, help="Bounding box shift value")
     parser.add_argument("--result_dir", default='./results', help="Directory for output results")
     parser.add_argument("--extra_margin", type=int, default=10, help="Extra margin for face cropping")
-    parser.add_argument("--fps", type=int, default=25, help="Video frames per second")
+    parser.add_argument("--fps", type=parse_fps, default=None, help="Override output FPS (default: source video FPS, or 25 for images)")
     parser.add_argument("--audio_padding_length_left", type=int, default=2, help="Left padding length for audio")
     parser.add_argument("--audio_padding_length_right", type=int, default=2, help="Right padding length for audio")
     parser.add_argument("--batch_size", type=int, default=20, help="Batch size for inference")
@@ -389,6 +403,7 @@ if __name__ == "__main__":
     for avatar_id in inference_config:
         data_preparation = inference_config[avatar_id]["preparation"]
         video_path = inference_config[avatar_id]["video_path"]
+        fps = resolve_realtime_fps(video_path, args.fps)
         if args.version == "v15":
             bbox_shift = 0
         else:
@@ -405,5 +420,5 @@ if __name__ == "__main__":
             print("Inferring using:", audio_path)
             avatar.inference(audio_path,
                            audio_num,
-                           args.fps,
+                           fps,
                            args.skip_save_images)

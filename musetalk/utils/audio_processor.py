@@ -1,3 +1,4 @@
+import argparse
 import math
 import os
 
@@ -6,6 +7,17 @@ import numpy as np
 import torch
 from einops import rearrange
 from transformers import AutoFeatureExtractor
+
+
+def parse_fps(value):
+    # Reject invalid rates before inference or media encoding starts.
+    try:
+        fps = float(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("FPS must be a finite positive number") from exc
+    if not math.isfinite(fps) or fps <= 0:
+        raise argparse.ArgumentTypeError("FPS must be a finite positive number")
+    return fps
 
 
 class AudioProcessor:
@@ -58,7 +70,7 @@ class AudioProcessor:
         # Trim the last segment to remove padding
         sr = 16000
         audio_fps = 50
-        fps = int(fps)
+        fps = float(fps)
         whisper_idx_multiplier = audio_fps / fps
         num_frames = math.floor((librosa_length / sr) * fps)
         actual_length = math.floor((librosa_length / sr) * audio_fps)

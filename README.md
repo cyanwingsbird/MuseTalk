@@ -1,5 +1,7 @@
 # MuseTalk
 
+> Fork-specific options and maintenance notes: [FORK_CHANGES.md](FORK_CHANGES.md).
+
 <strong>MuseTalk: Real-Time High-Fidelity Video Dubbing via Spatio-Temporal Sampling</strong>
 
 Yue Zhang<sup>\*</sup>,
