@@ -107,3 +107,41 @@ retain the old result. Realtime is outside the convenience custom profile.
 Input media, local environments and launchers, generated results, and accidental
 sample-media deletions are not required for these changes. Review the staged
 files before committing; model weights are not included.
+
+## Resumable training
+
+Upstream training could not resume. `train.py` wrote only `unet-<step>.pth` during training; its
+`accelerator.save_state` call sat in the per-epoch block, which never runs with the default
+`save_model_epoch_interval`, so no `checkpoint-*` folder was created and a restarted job began again
+from step 0 (in stage 1 also from the initial UNet). The state also lacked the GAN discriminators.
+
+`train.py` now saves a full resume state every `checkpointing_steps`: the UNet, AdamW, LR scheduler,
+both discriminators with their optimizers and LR schedulers (registered with
+`accelerator.register_for_checkpointing`), and RNG states. Each state is written to
+`checkpoint-<step>.partial/`, marked `COMPLETE` and renamed, so an interrupted save never becomes
+the newest checkpoint; resume loads the newest complete one. Saves and stops happen only on
+optimizer-update boundaries (`global_step` counts batches; the optimizer steps every
+`gradient_accumulation_steps` batches), so no partially accumulated gradient is lost, and
+`checkpointing_steps` must be a multiple of `gradient_accumulation_steps`.
+
+Optional controls, all off by default:
+
+- `TRAIN_DEADLINE_EPOCH` (Unix time) and `TRAIN_SAVE_MARGIN_SEC` (default 1800): save and exit
+  cleanly that long before a scheduler time limit.
+- A `STOP` file in the run folder (`<output_dir>/<exp_name>/`): save and exit at the next update.
+- `resume_states_to_keep` (default 2): full resume states kept; `total_limit` still bounds the
+  `unet-<step>.pth` files.
+- A `DONE` file is written when `max_train_steps` is reached, and the epoch loop now stops there
+  instead of running one extra batch per remaining epoch.
+
+## Training configuration options
+
+- `solver.lr_scheduler_total_steps` and `solver.lr_scheduler_warmup_steps` (in LR-scheduler steps,
+  i.e. optimizer updates) set the schedule length explicitly. This lets a run with a different
+  batch-size/accumulation split, for example fewer GPUs, keep upstream's LR and discriminator
+  schedules. Without them the upstream formula is used.
+- `data.val_list` points the validation loader at a separate list file (upstream drew validation
+  images from `train.txt`). Without it behavior is unchanged.
+
+Machine-specific training configs, launch scripts and accelerate configs are kept outside the
+repository.

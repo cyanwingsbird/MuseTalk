@@ -503,11 +503,11 @@ class HDTFDataset(FaceDataset):
     def __init__(self, cfg):
         root_path = './dataset/HDTF/meta'
         list_paths = [
-            './dataset/HDTF/train.txt',
+            cfg.get('list_path', './dataset/HDTF/train.txt'),  # [canto] val list support
         ]
         
 
-        repeats = [10]
+        repeats = [cfg.get('list_repeat', 10)]
         super().__init__(cfg, list_paths, root_path, repeats)
         print('HDTFDataset: ', len(self))
 

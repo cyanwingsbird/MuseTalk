@@ -131,11 +131,15 @@ def initialize_models_and_optimizers(cfg, accelerator, weight_dtype):
         eps=cfg.solver.adam_epsilon,
     )
 
-    model_dict['scheduler_max_steps'] = cfg.solver.max_train_steps * cfg.solver.gradient_accumulation_steps
+    # [canto] Optional explicit schedule lengths (in LR-scheduler steps, i.e. optimizer updates),
+    # so a single-GPU run with a different batch/accumulation split can keep upstream's schedule.
+    model_dict['scheduler_max_steps'] = cfg.solver.get(
+        'lr_scheduler_total_steps', cfg.solver.max_train_steps * cfg.solver.gradient_accumulation_steps)
     model_dict['lr_scheduler'] = get_scheduler(
         cfg.solver.lr_scheduler,
         optimizer=model_dict['optimizer'],
-        num_warmup_steps=cfg.solver.lr_warmup_steps * cfg.solver.gradient_accumulation_steps,
+        num_warmup_steps=cfg.solver.get(
+            'lr_scheduler_warmup_steps', cfg.solver.lr_warmup_steps * cfg.solver.gradient_accumulation_steps),
         num_training_steps=model_dict['scheduler_max_steps'],
     )
 
@@ -187,6 +191,9 @@ def initialize_dataloaders(cfg):
         "cropping_jaw2edge_margin_std": cfg.cropping_jaw2edge_margin_std,
         "crop_type": cfg.crop_type,
         "random_margin_method": cfg.random_margin_method,
+        # [canto] held-out validation list when data.val_list is set (upstream re-used train.txt)
+        "list_path": cfg.data.get('val_list', './dataset/HDTF/train.txt'),
+        "list_repeat": 1 if cfg.data.get('val_list') else 10,
     })
 
     dataloader_dict['val_dataloader'] = torch.utils.data.DataLoader(

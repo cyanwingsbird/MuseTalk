@@ -11,6 +11,9 @@ import torch.utils.checkpoint
 import transformers
 import warnings
 import random
+import re
+import shutil
+import sys
 
 from accelerate import Accelerator
 from accelerate.utils import LoggerType
@@ -89,6 +92,14 @@ def main(cfg):
     syncnet = initialize_syncnet(cfg, accelerator, weight_dtype)
     vgg_IN, pyramid, downsampler = initialize_vgg(cfg, accelerator)
 
+    # [canto-resume] Upstream resume state held only the UNet/optimizer/LR scheduler and was
+    # never written during training. Register the GAN discriminators, their optimizers and
+    # LR schedulers so accelerator.save_state/load_state carry them too. Order is fixed.
+    for key in ('discriminator', 'optimizer_D', 'scheduler_D',
+                'mouth_discriminator', 'mouth_optimizer_D', 'mouth_scheduler_D'):
+        if loss_dict.get(key) is not None:
+            accelerator.register_for_checkpointing(loss_dict[key])
+
     # Prepare everything with our `accelerator`.
     model_dict['net'], model_dict['optimizer'], model_dict['lr_scheduler'], dataloader_dict['train_dataloader'], dataloader_dict['val_dataloader'] = accelerator.prepare(
         model_dict['net'], model_dict['optimizer'], model_dict['lr_scheduler'], dataloader_dict['train_dataloader'], dataloader_dict['val_dataloader']
@@ -132,19 +143,58 @@ def main(cfg):
     global_step = 0
     first_epoch = 0
 
+    # [canto-resume] global_step counts micro-batches (sync_gradients stays True because the
+    # loop does not use accelerator.accumulate); the optimizer steps when global_step is a
+    # multiple of gradient_accumulation_steps, so save/stop only on those boundaries.
+    accum = cfg.solver.gradient_accumulation_steps
+    assert cfg.checkpointing_steps % accum == 0, "checkpointing_steps must be a multiple of gradient_accumulation_steps"
+    micro_steps_per_epoch = len(dataloader_dict['train_dataloader'])
+    keep_states = int(cfg.get('resume_states_to_keep', 2))
+    ckpt_re = re.compile(r"^checkpoint-(\d+)$")
+    deadline = float(os.environ.get("TRAIN_DEADLINE_EPOCH") or 0)
+    save_margin = float(os.environ.get("TRAIN_SAVE_MARGIN_SEC") or 1800)
+    stop_file = os.path.join(save_dir, "STOP")
+    done_file = os.path.join(save_dir, "DONE")
+
+    def complete_states():
+        found = [d for d in os.listdir(save_dir)
+                 if ckpt_re.match(d) and os.path.exists(os.path.join(save_dir, d, "COMPLETE"))]
+        return sorted(found, key=lambda d: int(ckpt_re.match(d).group(1)))
+
+    def save_resume_state(step):
+        # UNet weights (unet-<step>.pth, newest cfg.total_limit kept) plus the full resume state
+        # written to a temporary folder and renamed only when complete.
+        t0 = time.time()
+        if accelerator.is_main_process:
+            save_models(accelerator, model_dict['net'], save_dir, step, cfg, logger=logger)
+        final_dir = os.path.join(save_dir, f"checkpoint-{step}")
+        tmp_dir = final_dir + ".partial"
+        if accelerator.is_main_process:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        accelerator.wait_for_everyone()
+        accelerator.save_state(tmp_dir)
+        accelerator.wait_for_everyone()
+        if accelerator.is_main_process:
+            with open(os.path.join(tmp_dir, "COMPLETE"), "w") as f:
+                f.write(f"{step}\n")
+            shutil.rmtree(final_dir, ignore_errors=True)
+            os.rename(tmp_dir, final_dir)
+            for old in complete_states()[:-keep_states]:
+                shutil.rmtree(os.path.join(save_dir, old), ignore_errors=True)
+            print(f"Resume state checkpoint-{step} saved in {time.time() - t0:.0f}s", flush=True)
+        accelerator.wait_for_everyone()
+
     # Load checkpoint if resuming training
     if cfg.resume_from_checkpoint:
-        resume_dir = save_dir
-        dirs = os.listdir(resume_dir)
-        dirs = [d for d in dirs if d.startswith("checkpoint")]
-        dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
+        dirs = complete_states()
         if len(dirs) > 0:
             path = dirs[-1]
-            accelerator.load_state(os.path.join(resume_dir, path))
+            accelerator.load_state(os.path.join(save_dir, path))
             accelerator.print(f"Resuming from checkpoint {path}")
-            global_step = int(path.split("-")[1])
-            first_epoch = global_step // num_update_steps_per_epoch
-            resume_step = global_step % num_update_steps_per_epoch
+            global_step = int(ckpt_re.match(path).group(1))
+            first_epoch = global_step // micro_steps_per_epoch
+    last_saved_step = global_step
+    stop_requested = False
 
     # Initialize progress bar
     progress_bar = tqdm(
@@ -516,28 +566,21 @@ def main(cfg):
                     except Exception as e:
                         print(f"An error occurred during validation: {e}")
 
-                # Save checkpoint if needed
+                # Save checkpoint if needed ([canto-resume]: full resume state, not just the UNet)
+                save_path = os.path.join(save_dir, f"checkpoint-{global_step}")
                 if global_step % cfg.checkpointing_steps == 0:
-                    save_path = os.path.join(save_dir, f"checkpoint-{global_step}")
-                    try:
-                        start_time = time.time()
-                        if accelerator.is_main_process:
-                            save_models(
-                                accelerator, 
-                                model_dict['net'],
-                                save_dir, 
-                                global_step, 
-                                cfg, 
-                                logger=logger
-                            )
-                            delete_additional_ckpt(save_dir, cfg.total_limit)
-                        elapsed_time = time.time() - start_time
-                        if elapsed_time > 300:
-                            print(f"Skipping storage as it took too long in step {global_step}.")
-                        else:
-                            print(f"Resume states saved at {save_dir} successfully in {elapsed_time}s.")
-                    except Exception as e:
-                        print(f"Error when saving model in step {global_step}:", e)
+                    save_resume_state(global_step)
+                    last_saved_step = global_step
+
+                # [canto-resume] Stop cleanly before the Slurm time limit or when STOP exists,
+                # at an optimizer boundary, after saving the resume state.
+                if global_step % accum == 0 and (
+                        (deadline and time.time() > deadline - save_margin) or os.path.exists(stop_file)):
+                    if last_saved_step != global_step:
+                        save_resume_state(global_step)
+                        last_saved_step = global_step
+                    print(f"Stopping at step {global_step} for resume (time limit or STOP file).", flush=True)
+                    stop_requested = True
 
             # Update progress bar
             t_model = time.time() - t_model_start
@@ -550,7 +593,7 @@ def main(cfg):
             t_data_start = time.time()
             progress_bar.set_postfix(**logs)
 
-            if global_step >= cfg.solver.max_train_steps:
+            if global_step >= cfg.solver.max_train_steps or stop_requested:
                 break
 
         # Save model after each epoch
@@ -568,6 +611,16 @@ def main(cfg):
             except Exception as e:
                 print(f"Error when saving model in step {global_step}:", e)
         accelerator.wait_for_everyone()
+        if global_step >= cfg.solver.max_train_steps or stop_requested:
+            break
+
+    # [canto-resume] Final state, and a DONE marker so the job chain stops.
+    if not stop_requested and global_step >= cfg.solver.max_train_steps:
+        if last_saved_step != global_step:
+            save_resume_state(global_step)
+        if accelerator.is_main_process:
+            with open(done_file, "w") as f:
+                f.write(f"{global_step}\n")
 
     # End training
     accelerator.end_training()
