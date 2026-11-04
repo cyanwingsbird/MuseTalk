@@ -54,6 +54,8 @@ class FaceDataset(Dataset):
 
         # Set basic attributes
         self.meta_paths = meta_paths
+        self.list_paths, self.repeats = list(list_paths), list(repeats)  # [canto] for reload_list()
+        self.epoch_samples = int(cfg.get('epoch_samples', 100000))      # [canto] optional; upstream 100000
         self.root_path = root_path
         self.image_size = cfg['image_size']
         self.min_face_size = cfg['min_face_size']
@@ -85,6 +87,25 @@ class FaceDataset(Dataset):
         print("The sample method is: ", self.sample_method)
         print(f"only use face size > {self.min_face_size}", self.contorl_face_min_size)
 
+    def reload_list(self):
+        """[canto] Re-read the list files (a rolling data window changes them between epochs).
+        Keeps the previous list if the new one is empty or unreadable."""
+        meta_paths = []
+        try:
+            for list_path, repeat_time in zip(self.list_paths, self.repeats):
+                with open(list_path, 'r') as f:
+                    f.readline()  # header
+                    for line in f.readlines():
+                        meta = line.strip().split()
+                        if meta:
+                            meta_paths.extend([os.path.join(self.root_path, meta[0])] * repeat_time)
+        except Exception as e:
+            print(f"list reload failed, keeping {len(self.meta_paths)} entries: {e!r}")
+            return len(self.meta_paths)
+        if meta_paths:
+            self.meta_paths = meta_paths
+        return len(self.meta_paths)
+
     def generate_random_value(self):
         """Generate random value
         
@@ -110,7 +131,7 @@ class FaceDataset(Dataset):
             raise ValueError(f"Invalid random margin method: {self.random_margin_method}")
         return max(0, random_value)
 
-    def dynamic_margin_crop(self, img, original_bbox, extra_margin=None):
+    def dynamic_margin_crop(self, img, original_bbox, extra_margin=None, frame_size=None):
         """Dynamically crop image with dynamic margin
         
         Args:
@@ -123,12 +144,12 @@ class FaceDataset(Dataset):
         """
         if extra_margin is None:
             extra_margin = self.generate_random_value()
-        w, h = img.size
+        w, h = frame_size or img.size  # [canto] full-frame size even for face-cropped videos
         x1, y1, x2, y2 = original_bbox
         y2 = min(y2 + int(extra_margin), h)
         return x1, y1, x2, y2, extra_margin
 
-    def crop_resize_img(self, img, bbox, crop_type='crop_resize', extra_margin=None):
+    def crop_resize_img(self, img, bbox, crop_type='crop_resize', extra_margin=None, frame_size=None, offset=(0, 0)):
         """Crop and resize image
         
         Args:
@@ -143,12 +164,13 @@ class FaceDataset(Dataset):
         mask_scaled_factor = 1.
         if crop_type == 'crop_resize':
             x1, y1, x2, y2 = bbox
-            img = img.crop((x1, y1, x2, y2))
+            # [canto] bbox is in full-frame coordinates; offset is the face-crop origin of the video
+            img = img.crop((x1 - offset[0], y1 - offset[1], x2 - offset[0], y2 - offset[1]))
             img = img.resize((self.image_size, self.image_size), Image.LANCZOS)
         elif crop_type == 'dynamic_margin_crop_resize':
-            x1, y1, x2, y2, extra_margin = self.dynamic_margin_crop(img, bbox, extra_margin)
-            w_original, _ = img.size
-            img = img.crop((x1, y1, x2, y2))
+            x1, y1, x2, y2, extra_margin = self.dynamic_margin_crop(img, bbox, extra_margin, frame_size)
+            w_original, _ = frame_size or img.size
+            img = img.crop((x1 - offset[0], y1 - offset[1], x2 - offset[0], y2 - offset[1]))
             w_cropped, _ = img.size
             mask_scaled_factor = w_cropped / w_original
             img = img.resize((self.image_size, self.image_size), Image.LANCZOS)
@@ -299,7 +321,7 @@ class FaceDataset(Dataset):
         return Image.fromarray(mask)
 
     def __len__(self):
-        return 100000
+        return self.epoch_samples  # upstream: 100000
 
     def __getitem__(self, idx):
         attempts = 0
@@ -379,19 +401,37 @@ class FaceDataset(Dataset):
                 print(f"video {video_path} has invalid source index for drive frames")
                 continue
 
+            # [canto] Face-cropped videos carry crop_offset; boxes/landmarks stay in full-frame
+            # coordinates and video_size ([h, w]) gives the full frame, so crops are unchanged.
+            if "crop_offset" in meta_data:
+                crop_offset = tuple(meta_data["crop_offset"])
+                frame_size = (meta_data["video_size"][1], meta_data["video_size"][0])
+            else:
+                crop_offset, frame_size = (0, 0), None
+            # [canto] Decode every needed frame in one sorted pass (identical pixels, far fewer seeks).
+            needed = sorted(set(src_idx_list) | set(drive_idx_list))
+            try:
+                decoded = dict(zip(needed, cap.get_batch(needed).asnumpy()))
+            except Exception as e:
+                print(f"video decode error:{video_path}: {e!r}")
+                attempts += 1
+                continue
+
             ref_face_valid_flag = True
             extra_margin = self.generate_random_value()
             
             # Get reference images
             ref_imgs = []
             for src_idx in src_idx_list:
-                imSrc = Image.fromarray(cap[src_idx].asnumpy())
+                imSrc = Image.fromarray(decoded[src_idx])
                 bbox_s = bbox_list_union[src_idx]
                 imSrc, _, _ = self.crop_resize_img(
                     imSrc,
                     bbox_s, 
                     self.crop_type, 
-                    extra_margin=None
+                    extra_margin=None,
+                    frame_size=frame_size,
+                    offset=crop_offset,
                 )
                 if self.contorl_face_min_size and min(imSrc.size[0], imSrc.size[1]) < self.min_face_size:
                     ref_face_valid_flag = False
@@ -411,13 +451,15 @@ class FaceDataset(Dataset):
             target_face_valid_flag = True
             
             for drive_idx in drive_idx_list:
-                imSameID = Image.fromarray(cap[drive_idx].asnumpy())
+                imSameID = Image.fromarray(decoded[drive_idx])
                 bbox_s = bbox_list_union[drive_idx]
                 imSameID, _ , mask_scaled_factor = self.crop_resize_img(
                     imSameID, 
                     bbox_s, 
                     self.crop_type, 
-                    extra_margin=extra_margin
+                    extra_margin=extra_margin,
+                    frame_size=frame_size,
+                    offset=crop_offset,
                 )
                 if self.contorl_face_min_size and min(imSameID.size[0], imSameID.size[1]) < self.min_face_size:
                     target_face_valid_flag = False
@@ -461,7 +503,8 @@ class FaceDataset(Dataset):
 
             try:
                 audio_feature, audio_offset = self.get_audio_file(wav_path, audio_offset)
-                _, audio_offset = self.get_audio_file_mel(wav_path, audio_offset)
+                # [canto] upstream also called get_audio_file_mel here and discarded the mel; it
+                # returns audio_offset unchanged, so skipping it changes no output.
                 audio_feature_mel = self.get_syncnet_input(video_path)
             except Exception as e:
                 print(f"audio file error:{wav_path}")
@@ -501,7 +544,7 @@ class FaceDataset(Dataset):
 class HDTFDataset(FaceDataset):
     """HDTF dataset class"""
     def __init__(self, cfg):
-        root_path = './dataset/HDTF/meta'
+        root_path = cfg.get('meta_root', './dataset/HDTF/meta')  # [canto] configurable
         list_paths = [
             cfg.get('list_path', './dataset/HDTF/train.txt'),  # [canto] val list support
         ]

@@ -168,6 +168,10 @@ def initialize_dataloaders(cfg):
         "cropping_jaw2edge_margin_std": cfg.cropping_jaw2edge_margin_std,
         "crop_type": cfg.crop_type,
         "random_margin_method": cfg.random_margin_method,
+        # [canto] optional list / meta folder (e.g. a rolling data window)
+        "list_path": cfg.data.get('train_list', './dataset/HDTF/train.txt'),
+        "epoch_samples": cfg.data.get('epoch_samples', 100000),
+        "meta_root": cfg.data.get('meta_root', './dataset/HDTF/meta'),
     })
 
     dataloader_dict['train_dataloader'] = torch.utils.data.DataLoader(
@@ -194,6 +198,7 @@ def initialize_dataloaders(cfg):
         # [canto] held-out validation list when data.val_list is set (upstream re-used train.txt)
         "list_path": cfg.data.get('val_list', './dataset/HDTF/train.txt'),
         "list_repeat": 1 if cfg.data.get('val_list') else 10,
+        "meta_root": cfg.data.get('val_meta_root', cfg.data.get('meta_root', './dataset/HDTF/meta')),
     })
 
     dataloader_dict['val_dataloader'] = torch.utils.data.DataLoader(

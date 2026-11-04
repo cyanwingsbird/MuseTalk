@@ -145,3 +145,31 @@ Optional controls, all off by default:
 
 Machine-specific training configs, launch scripts and accelerate configs are kept outside the
 repository.
+
+## Faster, exact data loading
+
+These change speed and robustness only; on both stage configs the loader returns tensors identical to
+upstream's (checked on original clips and on lossless face-cropped clips, fixed seeds).
+
+- Each sample's frames are decoded in one sorted pass (`get_batch`) instead of one random seek per
+  frame. Same pixels; stage 2 (16 targets + 16 references) loads about 3.6x faster.
+- `ensure_wav` returns a WAV that is already 16 kHz mono 16-bit PCM unchanged. Before, every sample
+  ran ffmpeg twice and wrote `<clip>_16k.wav` beside the data (identical samples), and two data-loader
+  workers could race on the same file.
+- The spectrogram that `get_audio_file_mel` computed and then discarded is no longer computed.
+- A video decode error makes the loader try another sample instead of crashing the worker.
+- Face-cropped videos: a meta file may carry `crop_offset` `[x, y]`, the top-left corner of the crop in
+  the original frame. Boxes, landmarks and `video_size` stay in full-frame coordinates, so every crop,
+  mask and dynamic margin is computed exactly as on the full frame.
+
+## Rolling data window options
+
+All optional; without them behavior is unchanged.
+
+- `data.train_list`, `data.meta_root`: training list file and meta folder (upstream hard-coded
+  `./dataset/HDTF/train.txt` and `./dataset/HDTF/meta`); `data.val_meta_root` for validation.
+- `data.reload_list_each_epoch`: re-read the training list at the start of every epoch, before data
+  workers start, so a list that changes during training (a rolling window of clips) is picked up.
+  An empty or unreadable list keeps the previous one.
+- `data.epoch_samples`: samples per epoch (upstream fixed 100000). Clips are drawn at random with
+  replacement, so this only sets how often the list is re-read and workers restart.

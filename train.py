@@ -218,6 +218,11 @@ def main(cfg):
         
     # Training loop
     for epoch in range(first_epoch, num_train_epochs):
+        # [canto] Rolling data window: pick up the current clip list before workers start.
+        if cfg.data.get('reload_list_each_epoch', False):
+            for d in dataloader_dict['train_dataset'].datasets:
+                n = d.reload_list()
+                accelerator.print(f"epoch {epoch}: training list reloaded, {n} entries", flush=True)
         # Set models to training mode
         model_dict['unet'].train()
         if cfg.loss_params.gan_loss > 0:
