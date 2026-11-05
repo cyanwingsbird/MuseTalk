@@ -172,6 +172,7 @@ def initialize_dataloaders(cfg):
         "list_path": cfg.data.get('train_list', './dataset/HDTF/train.txt'),
         "epoch_samples": cfg.data.get('epoch_samples', 100000),
         "meta_root": cfg.data.get('meta_root', './dataset/HDTF/meta'),
+        "decode_threads": cfg.data.get('decode_threads', 0),  # [canto] 1 avoids CPU oversubscription with many workers
     })
 
     dataloader_dict['train_dataloader'] = torch.utils.data.DataLoader(
@@ -199,6 +200,7 @@ def initialize_dataloaders(cfg):
         "list_path": cfg.data.get('val_list', './dataset/HDTF/train.txt'),
         "list_repeat": 1 if cfg.data.get('val_list') else 10,
         "meta_root": cfg.data.get('val_meta_root', cfg.data.get('meta_root', './dataset/HDTF/meta')),
+        "decode_threads": cfg.data.get('decode_threads', 0),  # [canto] 1 avoids CPU oversubscription with many workers
     })
 
     dataloader_dict['val_dataloader'] = torch.utils.data.DataLoader(

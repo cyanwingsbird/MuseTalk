@@ -56,6 +56,7 @@ class FaceDataset(Dataset):
         self.meta_paths = meta_paths
         self.list_paths, self.repeats = list(list_paths), list(repeats)  # [canto] for reload_list()
         self.epoch_samples = int(cfg.get('epoch_samples', 100000))      # [canto] optional; upstream 100000
+        self.decode_threads = int(cfg.get('decode_threads', 0))         # [canto] decord threads per reader; upstream 0 = auto
         self.root_path = root_path
         self.image_size = cfg['image_size']
         self.min_face_size = cfg['min_face_size']
@@ -353,7 +354,7 @@ class FaceDataset(Dataset):
                 continue
 
             try:
-                cap = VideoReader(video_path, fault_tol=1, ctx=cpu(0))
+                cap = VideoReader(video_path, fault_tol=1, ctx=cpu(0), num_threads=self.decode_threads)
                 total_frames = len(cap)
                 assert total_frames == len(landmark_list)
                 assert total_frames == len(bbox_list)

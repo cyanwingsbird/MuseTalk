@@ -173,3 +173,12 @@ All optional; without them behavior is unchanged.
   An empty or unreadable list keeps the previous one.
 - `data.epoch_samples`: samples per epoch (upstream fixed 100000). Clips are drawn at random with
   replacement, so this only sets how often the list is re-read and workers restart.
+
+## Decoder threads per data worker (`data.decode_threads`)
+
+`FaceDataset` now passes `num_threads=cfg['decode_threads']` to decord's `VideoReader`
+(default `0`, decord's automatic thread count, i.e. upstream behaviour). With many
+DataLoader workers on few CPUs, each worker's automatic decode threads oversubscribe the
+CPUs and the GPU waits for data. Setting `data.decode_threads: 1` keeps one decode thread
+per worker. Samples are bit-identical either way (checked with fixed seeds on stage-1 and
+stage-2 settings); only speed changes.
