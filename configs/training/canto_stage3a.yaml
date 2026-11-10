@@ -1,6 +1,6 @@
 exp_name: 'canto_stage3a'  # Name of the experiment
 output_dir: './exp_out/stage3a/'  # Directory to save experiment outputs
-unet_sub_folder: canto_stage2_step12000  # [canto] phase 3a starts from the chosen stage-2 checkpoint
+unet_sub_folder: canto_stage2_step24000  # [canto] phase 3a starts from the chosen stage-2 checkpoint (step 24,000: best outside-speaker sync confidence, before the decline)
 random_init_unet: False  # Whether to randomly initialize UNet (stage1) or use pretrained weights (stage2)
 whisper_path: "./models/whisper"  # Path to the Whisper model
 pretrained_model_name_or_path: "./models"  # Path to pretrained models
