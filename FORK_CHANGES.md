@@ -182,3 +182,29 @@ DataLoader workers on few CPUs, each worker's automatic decode threads oversubsc
 CPUs and the GPU waits for data. Setting `data.decode_threads: 1` keeps one decode thread
 per worker. Samples are bit-identical either way (checked with fixed seeds on stage-1 and
 stage-2 settings); only speed changes.
+
+## Optional generalisation options for fine-tuning on few speakers (phase 3a)
+
+All optional and off by default; without them behavior is unchanged (with the options off, samples are
+bit-identical to the previous code for fixed seeds: `tools/check_phase3a.py`).
+
+- `data.balance_by_source`: draw a source video first, then one of its clips, instead of drawing every clip
+  with equal chance. The source is the clip name without its trailing `-<number>` (`data.source_key_regex`
+  overrides the pattern). `data.balance_alpha` (default 0) sets the chance of a source to
+  (number of its clips) ** alpha: 0 = every source equally, 1 = every clip equally. Training set only; the
+  groups follow the list when `data.reload_list_each_epoch` re-reads it.
+- `data.augment`: picture augmentation with one set of random parameters for all frames of a sample; the
+  target frames and the reference frames get the same change, the mouth masks are only flipped. Keys:
+  `color` (brightness / contrast / saturation factors in [1-s, 1+s]), `flip_p`, `blur_p`, `blur_max`
+  (Gaussian radius), `down_p`, `down_min` (down-scale, then back up), `jpeg_p`, `jpeg_min` (quality).
+  Training set only.
+- `loss_params.diffaug_policy` (for example `"color,translation"`): differentiable augmentation of the
+  inputs of both discriminators (`musetalk/utils/diffaug.py`, after Zhao et al., "Differentiable
+  Augmentation for Data-Efficient GAN Training", 2020). The parameters are shared by the real and the
+  generated image of each pair, so the feature-matching loss stays aligned. The reconstruction, perceptual
+  and sync losses still see the unaugmented images.
+- `configs/training/canto_stage3a.yaml`: a third fine-tuning phase that starts from a stage-2 checkpoint
+  with a flat low learning rate and the three options above; `train_canto.sbatch` accepts `STAGE=stage3a`.
+- `tools/check_phase3a.py`: CPU checks for the above.
+
+Status: CPU checks pass; a full GPU run of these options has not been done yet.

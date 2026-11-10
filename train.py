@@ -37,6 +37,7 @@ from musetalk.utils.utils import (
 )
 from musetalk.loss.basic_loss import set_requires_grad
 from musetalk.loss.syncnet import get_sync_loss
+from musetalk.utils.diffaug import PairedDiffAugment
 from musetalk.utils.training_utils import (
     initialize_models_and_optimizers,
     initialize_dataloaders,
@@ -216,6 +217,11 @@ def main(cfg):
         else:
             return 1.0
         
+    # [canto] optional differentiable augmentation of the discriminator inputs (loss_params.diffaug_policy, e.g.
+    # "color,translation"); unset or empty = off = upstream behaviour
+    diffaug = PairedDiffAugment(cfg.loss_params.diffaug_policy) if cfg.loss_params.get('diffaug_policy') else None
+    print("discriminator augmentation:", diffaug.ops if diffaug is not None else "off")
+
     # Training loop
     for epoch in range(first_epoch, num_train_epochs):
         # [canto] Rolling data window: pick up the current clip list before workers start.
@@ -387,6 +393,14 @@ def main(cfg):
                 )
                 pyramide_real_mouth = pyramid(downsampler(frames_mouth))
                 pyramide_generated_mouth = pyramid(downsampler(image_pred_mouth))
+                # [canto] optional paired differentiable augmentation of the discriminator inputs
+                if diffaug is not None:
+                    frames_mouth_d, image_pred_mouth_d = diffaug.pair(frames_mouth, image_pred_mouth)
+                    pyramide_real_mouth_d = pyramid(downsampler(frames_mouth_d))
+                    pyramide_generated_mouth_d = pyramid(downsampler(image_pred_mouth_d))
+                else:
+                    frames_mouth_d, image_pred_mouth_d = frames_mouth, image_pred_mouth
+                    pyramide_real_mouth_d, pyramide_generated_mouth_d = pyramide_real_mouth, pyramide_generated_mouth
 
             # Process VGG loss if enabled
             if cfg.loss_params.vgg_loss > 0:
@@ -408,8 +422,14 @@ def main(cfg):
             if cfg.loss_params.gan_loss > 0:
                 set_requires_grad(loss_dict['discriminator'], False)
                 loss_G = 0.
-                discriminator_maps_generated = loss_dict['discriminator'](pyramide_generated)
-                discriminator_maps_real = loss_dict['discriminator'](pyramide_real)
+                if diffaug is not None:   # [canto] same augmentation for the real and the generated image
+                    frames_d, image_pred_d = diffaug.pair(frames, image_pred)
+                    pyramide_real_d, pyramide_generated_d = pyramid(downsampler(frames_d)), pyramid(downsampler(image_pred_d))
+                else:
+                    frames_d, image_pred_d = frames, image_pred
+                    pyramide_real_d, pyramide_generated_d = pyramide_real, pyramide_generated
+                discriminator_maps_generated = loss_dict['discriminator'](pyramide_generated_d)
+                discriminator_maps_real = loss_dict['discriminator'](pyramide_real_d)
 
                 for scale in loss_dict['disc_scales']:
                     key = 'prediction_map_%s' % scale
@@ -434,8 +454,8 @@ def main(cfg):
             if cfg.loss_params.mouth_gan_loss > 0:
                 set_requires_grad(loss_dict['mouth_discriminator'], False)
                 loss_G = 0.
-                mouth_discriminator_maps_generated = loss_dict['mouth_discriminator'](pyramide_generated_mouth)
-                mouth_discriminator_maps_real = loss_dict['mouth_discriminator'](pyramide_real_mouth)
+                mouth_discriminator_maps_generated = loss_dict['mouth_discriminator'](pyramide_generated_mouth_d)
+                mouth_discriminator_maps_real = loss_dict['mouth_discriminator'](pyramide_real_mouth_d)
 
                 for scale in loss_dict['disc_scales']:
                     key = 'prediction_map_%s' % scale
@@ -481,7 +501,7 @@ def main(cfg):
             # Train discriminator if GAN loss is enabled
             if cfg.loss_params.gan_loss > 0:
                 set_requires_grad(loss_dict['discriminator'], True)
-                loss_D = loss_dict['discriminator_full'](frames, image_pred.detach())
+                loss_D = loss_dict['discriminator_full'](frames_d, image_pred_d.detach())
                 avg_loss_D = accelerator.gather(loss_D.repeat(cfg.data.train_bs)).mean()
                 train_loss_D += avg_loss_D.item() / 1
                 loss_D = loss_D * get_ganloss_weight(global_step) * adapted_weight
@@ -499,7 +519,7 @@ def main(cfg):
             if cfg.loss_params.mouth_gan_loss > 0:
                 set_requires_grad(loss_dict['mouth_discriminator'], True)
                 mouth_loss_D = loss_dict['mouth_discriminator_full'](
-                    frames_mouth, image_pred_mouth.detach())
+                    frames_mouth_d, image_pred_mouth_d.detach())
                 avg_mouth_loss_D = accelerator.gather(
                     mouth_loss_D.repeat(cfg.data.train_bs)).mean()
                 train_loss_D_mouth += avg_mouth_loss_D.item() / 1

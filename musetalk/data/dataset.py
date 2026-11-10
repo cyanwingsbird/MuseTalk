@@ -1,7 +1,9 @@
 import os
+import io
+import re
 import numpy as np
 import random
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 import torch
 from torch.utils.data import Dataset, ConcatDataset
 import torchvision.transforms as transforms
@@ -57,6 +59,14 @@ class FaceDataset(Dataset):
         self.list_paths, self.repeats = list(list_paths), list(repeats)  # [canto] for reload_list()
         self.epoch_samples = int(cfg.get('epoch_samples', 100000))      # [canto] optional; upstream 100000
         self.decode_threads = int(cfg.get('decode_threads', 0))         # [canto] decord threads per reader; upstream 0 = auto
+        # [canto] optional: pick a source video first, then one of its clips (clip names end in -<number>)
+        self.balance_by_source = bool(cfg.get('balance_by_source', False))
+        self.source_key_re = re.compile(cfg.get('source_key_regex') or r'^(.*)-\d+$')
+        # chance of a source ~ (its number of clips) ** balance_alpha: 0 = every source equally, 1 = every clip equally
+        self.balance_alpha = float(cfg.get('balance_alpha', 0) or 0)
+        self._build_source_groups()
+        # [canto] optional picture augmentation, same random parameters for every frame of a sample (None = off)
+        self.augment = dict(cfg['augment']) if cfg.get('augment') else None
         self.root_path = root_path
         self.image_size = cfg['image_size']
         self.min_face_size = cfg['min_face_size']
@@ -105,7 +115,70 @@ class FaceDataset(Dataset):
             return len(self.meta_paths)
         if meta_paths:
             self.meta_paths = meta_paths
+            self._build_source_groups()
         return len(self.meta_paths)
+
+    def _build_source_groups(self):
+        """[canto] Group the clip list by source video for balance_by_source."""
+        self.source_groups, self.source_keys = {}, []
+        if not self.balance_by_source:
+            return
+        for path in dict.fromkeys(self.meta_paths):   # unique, order kept
+            name = os.path.splitext(os.path.basename(path))[0]
+            m = self.source_key_re.match(name)
+            self.source_groups.setdefault(m.group(1) if m else name, []).append(path)
+        self.source_keys = sorted(self.source_groups)
+        acc, self.source_cum_weights = 0.0, []
+        for k in self.source_keys:
+            acc += len(self.source_groups[k]) ** self.balance_alpha
+            self.source_cum_weights.append(acc)
+        print(f'balance_by_source: {len(self.source_keys)} sources, {sum(len(v) for v in self.source_groups.values())} clips')
+
+    def _pick_meta_path(self):
+        if self.balance_by_source and self.source_keys:
+            key = random.choices(self.source_keys, cum_weights=self.source_cum_weights, k=1)[0]
+            return random.choice(self.source_groups[key])
+        return random.sample(self.meta_paths, k=1)[0]
+
+    def apply_augment(self, targets, refs, masks):
+        """[canto] Picture augmentation with one set of random parameters for all frames of a sample.
+
+        Target frames and reference frames get the same changes (the model must still reproduce the target, in the
+        look given by the reference); masks are only flipped. Config keys (all optional):
+        color (strength s: brightness, contrast, saturation factors in [1-s, 1+s]), flip_p, blur_p, blur_max
+        (Gaussian radius), down_p, down_min (down-scale factor, then back up), jpeg_p, jpeg_min (quality)."""
+        a = self.augment
+        ops = []
+        s = float(a.get('color', 0) or 0)
+        if s > 0:
+            fb, fc, fs = (random.uniform(1 - s, 1 + s) for _ in range(3))
+            ops.append(lambda im: ImageEnhance.Color(ImageEnhance.Contrast(ImageEnhance.Brightness(im).enhance(fb)).enhance(fc)).enhance(fs))
+        if random.random() < float(a.get('down_p', 0) or 0):
+            f = random.uniform(float(a.get('down_min', 0.5)), 1.0)
+            def down(im, f=f):
+                w, h = im.size
+                return im.resize((max(8, round(w * f)), max(8, round(h * f))), Image.BICUBIC).resize((w, h), Image.BICUBIC)
+            ops.append(down)
+        if random.random() < float(a.get('blur_p', 0) or 0):
+            r = random.uniform(0.3, float(a.get('blur_max', 1.2)))
+            ops.append(lambda im, r=r: im.filter(ImageFilter.GaussianBlur(r)))
+        if random.random() < float(a.get('jpeg_p', 0) or 0):
+            q = random.randint(int(a.get('jpeg_min', 40)), 90)
+            def jpeg(im, q=q):
+                buf = io.BytesIO(); im.save(buf, format='JPEG', quality=q); buf.seek(0)
+                return Image.open(buf).convert('RGB')
+            ops.append(jpeg)
+        flip = random.random() < float(a.get('flip_p', 0) or 0)
+        def run(im):
+            im = im.convert('RGB')
+            for op in ops:
+                im = op(im)
+            return ImageOps.mirror(im) if flip else im
+        targets = [run(im) for im in targets]
+        refs = [run(im) for im in refs]
+        if flip:
+            masks = [ImageOps.mirror(m) for m in masks]
+        return targets, refs, masks
 
     def generate_random_value(self):
         """Generate random value
@@ -328,7 +401,7 @@ class FaceDataset(Dataset):
         attempts = 0
         while attempts < self.max_attempts:
             try:
-                meta_path = random.sample(self.meta_paths, k=1)[0]
+                meta_path = self._pick_meta_path()   # [canto] upstream: random.sample(self.meta_paths, k=1)[0]
                 with open(meta_path, 'r') as f:
                     meta_data = json.load(f)
             except Exception as e:
@@ -521,6 +594,9 @@ class FaceDataset(Dataset):
                 continue
                 
             mel = torch.FloatTensor(mel.T).unsqueeze(0)
+
+            if self.augment:   # [canto] optional picture augmentation (off by default)
+                imSameIDs, ref_imgs, face_masks = self.apply_augment(imSameIDs, ref_imgs, face_masks)
             
             # Build sample dictionary
             sample = dict(

@@ -173,6 +173,11 @@ def initialize_dataloaders(cfg):
         "epoch_samples": cfg.data.get('epoch_samples', 100000),
         "meta_root": cfg.data.get('meta_root', './dataset/HDTF/meta'),
         "decode_threads": cfg.data.get('decode_threads', 0),  # [canto] 1 avoids CPU oversubscription with many workers
+        # [canto] optional, training set only: balanced sampling over source videos and picture augmentation
+        "balance_by_source": cfg.data.get('balance_by_source', False),
+        "source_key_regex": cfg.data.get('source_key_regex', None),
+        "balance_alpha": cfg.data.get('balance_alpha', 0),
+        "augment": (dict(cfg.data.augment) if cfg.data.get('augment') else None),
     })
 
     dataloader_dict['train_dataloader'] = torch.utils.data.DataLoader(
