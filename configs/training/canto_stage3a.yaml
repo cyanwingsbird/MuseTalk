@@ -98,7 +98,7 @@ solver:
   adam_weight_decay: 1.0e-2  # Weight decay for Adam optimizer
   adam_epsilon: 1.0e-8  # Epsilon for Adam optimizer
 
-total_limit: 5  # Maximum number of checkpoints to keep
+total_limit: 3  # [canto] phase 3a: unet-<step>.pth files kept on the HPC (every scored one is copied to the PC); /home is nearly full
 save_model_epoch_interval: 250000  # Interval between model saves
 checkpointing_steps: 2000  # Number of steps between checkpoints
 val_freq: 2000  # official
@@ -106,4 +106,4 @@ val_freq: 2000  # official
 seed: 41  # Random seed for reproducibility
 
 # Stage 2 uses the official 2 x 8 (tested 2026-11-05: 75.2 GiB peak on the 80 GB slice).
-resume_states_to_keep: 2   # full resume states kept (checkpoint-<step>/, ~10 GB each)
+resume_states_to_keep: 1   # [canto] phase 3a: one full resume state (saves are atomic, the old one is removed after the new one is complete)
