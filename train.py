@@ -38,6 +38,7 @@ from musetalk.utils.utils import (
 from musetalk.loss.basic_loss import set_requires_grad
 from musetalk.loss.syncnet import get_sync_loss
 from musetalk.utils.diffaug import PairedDiffAugment
+from musetalk.loss.temporal import temporal_diff_loss   # [canto] phase 3b
 from musetalk.utils.training_utils import (
     initialize_models_and_optimizers,
     initialize_dataloaders,
@@ -246,6 +247,7 @@ def main(cfg):
         gan_loss_accum_mouth = 0.0
         fm_loss_accum = 0.0
         sync_loss_accum = 0.0
+        temporal_loss_accum = 0.0
         adapted_weight_accum = 0.0
 
         t_data_start = time.time()
@@ -493,6 +495,14 @@ def main(cfg):
                 sync_loss_accum += sync_loss.item()
                 loss += sync_loss * cfg.loss_params.sync_loss * adapted_weight
 
+            # [canto] phase 3b, optional (loss_params.temporal_loss, default off): the frame-to-frame change of the
+            # generated lower face should match that of the real frames
+            temporal_w = float(cfg.loss_params.get('temporal_loss', 0) or 0)
+            if temporal_w > 0 and pixel_values_backward.shape[1] > 1:
+                temporal_loss = temporal_diff_loss(image_pred, frames, pixel_values_backward.shape[1])
+                temporal_loss_accum += temporal_loss.item()
+                loss += temporal_loss * temporal_w * adapted_weight
+
             # Backward pass
             avg_loss = accelerator.gather(loss.repeat(cfg.data.train_bs)).mean()
             train_loss += avg_loss.item()
@@ -558,6 +568,7 @@ def main(cfg):
                     "gan_loss": gan_loss_accum,
                     "fm_loss": fm_loss_accum,
                     "sync_loss": sync_loss_accum,
+                    "temporal_loss": temporal_loss_accum,
                     "adapted_weight": adapted_weight_accum,
                     "lr": model_dict['lr_scheduler'].get_last_lr()[0],
                 }, step=global_step)
@@ -569,6 +580,7 @@ def main(cfg):
                 gan_loss_accum = 0.0
                 fm_loss_accum = 0.0
                 sync_loss_accum = 0.0
+                temporal_loss_accum = 0.0
                 adapted_weight_accum = 0.0
                 train_loss_D = 0.0
                 train_loss_D_mouth = 0.0

@@ -208,3 +208,19 @@ bit-identical to the previous code for fixed seeds: `tools/check_phase3a.py`).
 - `tools/check_phase3a.py`: CPU checks for the above.
 
 Status: CPU checks pass; a full GPU run of these options has not been done yet.
+
+## Optional audio-side options for fine-tuning on few speakers (phase 3b)
+
+Both optional and off by default; without them behavior is unchanged (with the options off, samples are
+bit-identical to the previous code for fixed seeds: `tools/check_phase3b.py`).
+
+- `data.audio_augment`: voice augmentation of the waveform that goes to the Whisper feature extractor
+  (`musetalk/utils/audio_aug.py`): pitch shift (`pitch_p`, `pitch_max` semitones; formants move with the pitch),
+  spectral tilt (`tilt_p`, `tilt_max` dB per octave around 1 kHz), white or pink noise (`noise_p`, `snr_db: [low, high]`).
+  Length and timing are unchanged (pitch within 0.1%, timing within a few ms), so audio and video stay aligned;
+  the mel spectrogram for the SyncNet loss is still made from the original audio.
+- `loss_params.temporal_loss`: weight of a light temporal loss (`musetalk/loss/temporal.py`): L1 between the
+  frame-to-frame change of the generated lower face and that of the real frames over the consecutive frames of a
+  sample. No extra network.
+- `configs/training/canto_stage3b.yaml`: the phase-3a config plus voice augmentation (temporal loss present, weight 0),
+  from stage-2 step 24,000, 8,000 steps; `STAGE=stage3b` in `train_canto.sbatch`.

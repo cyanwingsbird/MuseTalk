@@ -178,6 +178,7 @@ def initialize_dataloaders(cfg):
         "source_key_regex": cfg.data.get('source_key_regex', None),
         "balance_alpha": cfg.data.get('balance_alpha', 0),
         "augment": (dict(cfg.data.augment) if cfg.data.get('augment') else None),
+        "audio_augment": (dict(cfg.data.audio_augment) if cfg.data.get('audio_augment') else None),   # [canto] phase 3b
     })
 
     dataloader_dict['train_dataloader'] = torch.utils.data.DataLoader(

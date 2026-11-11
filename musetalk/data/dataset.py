@@ -18,6 +18,7 @@ from decord.ndarray import cpu
 from musetalk.data.sample_method import get_src_idx, shift_landmarks_to_face_coordinates, resize_landmark 
 from musetalk.data import audio 
 from musetalk.utils.audio_utils import ensure_wav
+from musetalk.utils.audio_aug import augment_voice   # [canto] phase 3b
 
 syncnet_mel_step_size = math.ceil(16 / 5 * 16)  # latentsync
 
@@ -67,6 +68,8 @@ class FaceDataset(Dataset):
         self._build_source_groups()
         # [canto] optional picture augmentation, same random parameters for every frame of a sample (None = off)
         self.augment = dict(cfg['augment']) if cfg.get('augment') else None
+        # [canto] optional voice augmentation of the Whisper input: pitch, spectral tilt, noise (None = off)
+        self.audio_augment = dict(cfg['audio_augment']) if cfg.get('audio_augment') else None
         self.root_path = root_path
         self.image_size = cfg['image_size']
         self.min_face_size = cfg['min_face_size']
@@ -284,6 +287,8 @@ class FaceDataset(Dataset):
         assert 2 * (start_index) >= 0
         assert 2 * (start_index + 2 * 25) <= 1500
 
+        if self.audio_augment:   # [canto] phase 3b: same speech and timing, different voice / recording (off by default)
+            audio_input, _ = augment_voice(audio_input, sampling_rate, self.audio_augment)
         audio_input = self.feature_extractor(
             audio_input,
             return_tensors="pt",
