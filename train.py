@@ -39,6 +39,7 @@ from musetalk.loss.basic_loss import set_requires_grad
 from musetalk.loss.syncnet import get_sync_loss
 from musetalk.utils.diffaug import PairedDiffAugment
 from musetalk.loss.temporal import temporal_diff_loss   # [canto] phase 3b
+from musetalk.loss.swap import roll_batch, upper_half, upper_mask_like   # [canto] phase 3c
 from musetalk.utils.training_utils import (
     initialize_models_and_optimizers,
     initialize_dataloaders,
@@ -248,6 +249,8 @@ def main(cfg):
         fm_loss_accum = 0.0
         sync_loss_accum = 0.0
         temporal_loss_accum = 0.0
+        swap_sync_accum = 0.0; swap_batches = 0   # [canto] phase 3c
+        swap_seen = 0   # [canto] the first swapped batches of an epoch are reported in the log
         adapted_weight_accum = 0.0
 
         t_data_start = time.time()
@@ -318,6 +321,14 @@ def main(cfg):
                     frames_left_index = 0
                     frames_right_index = cfg.data.n_sample_frames
 
+                # [canto] phase 3c, optional (loss_params.swap_audio_p, default off): train this batch with the audio of the
+                # other clip in the batch, so that the mouth has to follow the audio and not the visible upper face
+                swap_audio = False
+                swap_p = float(cfg.loss_params.get('swap_audio_p', 0) or 0)
+                if swap_p > 0 and bsz > 1 and cfg.loss_params.sync_loss > 0 and random.random() < swap_p:
+                    swap_audio = True
+                    audio_prompts, audio_embed = roll_batch(audio_prompts, audio_embed)
+
                 # Extract frames for backward pass
                 pixel_values_backward = pixel_values[:, frames_left_index:frames_right_index, ...]
                 ref_pixel_values_backward = ref_pixel_values[:, frames_left_index:frames_right_index, ...]
@@ -382,7 +393,10 @@ def main(cfg):
             frames = frames.float()
             
             # Calculate L1 loss
-            l1_loss = loss_dict['L1_loss'](frames, image_pred)
+            if swap_audio:   # [canto] under swapped audio the real lower half is not a valid target: upper half only
+                l1_loss = loss_dict['L1_loss'](upper_half(frames), upper_half(image_pred))
+            else:
+                l1_loss = loss_dict['L1_loss'](frames, image_pred)
             l1_loss_accum += l1_loss.item()
             loss = cfg.loss_params.l1_loss * l1_loss * adapted_weight
 
@@ -408,11 +422,16 @@ def main(cfg):
             if cfg.loss_params.vgg_loss > 0:
                 pyramide_real = pyramid(downsampler(frames))
                 pyramide_generated = pyramid(downsampler(image_pred))
+                if swap_audio:   # [canto] perceptual loss on the upper half only
+                    up_mask = upper_mask_like(frames)
+                    pyr_real_vgg, pyr_gen_vgg = pyramid(downsampler(frames * up_mask)), pyramid(downsampler(image_pred * up_mask))
+                else:
+                    pyr_real_vgg, pyr_gen_vgg = pyramide_real, pyramide_generated
 
                 loss_IN = 0
                 for scale in cfg.loss_params.pyramid_scale:
-                    x_vgg = vgg_IN(pyramide_generated['prediction_' + str(scale)])
-                    y_vgg = vgg_IN(pyramide_real['prediction_' + str(scale)])
+                    x_vgg = vgg_IN(pyr_gen_vgg['prediction_' + str(scale)])
+                    y_vgg = vgg_IN(pyr_real_vgg['prediction_' + str(scale)])
                     for i, weight in enumerate(cfg.loss_params.vgg_layer_weight):
                         value = torch.abs(x_vgg[i] - y_vgg[i].detach()).mean()
                         loss_IN += weight * value
@@ -442,7 +461,7 @@ def main(cfg):
                 loss += loss_G * cfg.loss_params.gan_loss * get_ganloss_weight(global_step) * adapted_weight
 
                 # Process feature matching loss if enabled
-                if cfg.loss_params.fm_loss[0] > 0:
+                if cfg.loss_params.fm_loss[0] > 0 and not swap_audio:   # [canto] feature matching pairs a generated image with its real frame
                     L_feature_matching = 0.
                     for scale in loss_dict['disc_scales']:
                         key = 'feature_maps_%s' % scale
@@ -468,7 +487,7 @@ def main(cfg):
                 loss += loss_G * cfg.loss_params.mouth_gan_loss * get_ganloss_weight(global_step) * adapted_weight
 
                 # Process feature matching loss for mouth if enabled
-                if cfg.loss_params.fm_loss[0] > 0:
+                if cfg.loss_params.fm_loss[0] > 0 and not swap_audio:   # [canto] feature matching pairs a generated image with its real frame
                     L_feature_matching = 0.
                     for scale in loss_dict['disc_scales']:
                         key = 'feature_maps_%s' % scale
@@ -493,12 +512,19 @@ def main(cfg):
                     frames_right_index=frames_right_index,
                 )
                 sync_loss_accum += sync_loss.item()
-                loss += sync_loss * cfg.loss_params.sync_loss * adapted_weight
+                if swap_audio:   # [canto] the sync loss is the signal that ties the mouth to the swapped audio
+                    sync_w = float(cfg.loss_params.get('swap_sync_loss', cfg.loss_params.sync_loss))
+                    swap_sync_accum += sync_loss.item(); swap_batches += 1; swap_seen += 1
+                    if swap_seen <= 3:
+                        print(f'\n[swap] step {global_step}: batch trained with the other clip\'s audio; sync loss {sync_loss.item():.3f}', flush=True)
+                else:
+                    sync_w = cfg.loss_params.sync_loss
+                loss += sync_loss * sync_w * adapted_weight
 
             # [canto] phase 3b, optional (loss_params.temporal_loss, default off): the frame-to-frame change of the
             # generated lower face should match that of the real frames
             temporal_w = float(cfg.loss_params.get('temporal_loss', 0) or 0)
-            if temporal_w > 0 and pixel_values_backward.shape[1] > 1:
+            if temporal_w > 0 and pixel_values_backward.shape[1] > 1 and not swap_audio:
                 temporal_loss = temporal_diff_loss(image_pred, frames, pixel_values_backward.shape[1])
                 temporal_loss_accum += temporal_loss.item()
                 loss += temporal_loss * temporal_w * adapted_weight
@@ -569,6 +595,8 @@ def main(cfg):
                     "fm_loss": fm_loss_accum,
                     "sync_loss": sync_loss_accum,
                     "temporal_loss": temporal_loss_accum,
+                    "swap_sync_loss": swap_sync_accum,
+                    "swap_batches": swap_batches,
                     "adapted_weight": adapted_weight_accum,
                     "lr": model_dict['lr_scheduler'].get_last_lr()[0],
                 }, step=global_step)
@@ -581,6 +609,7 @@ def main(cfg):
                 fm_loss_accum = 0.0
                 sync_loss_accum = 0.0
                 temporal_loss_accum = 0.0
+                swap_sync_accum = 0.0; swap_batches = 0   # [canto] phase 3c
                 adapted_weight_accum = 0.0
                 train_loss_D = 0.0
                 train_loss_D_mouth = 0.0

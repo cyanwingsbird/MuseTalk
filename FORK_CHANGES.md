@@ -224,3 +224,17 @@ bit-identical to the previous code for fixed seeds: `tools/check_phase3b.py`).
   sample. No extra network.
 - `configs/training/canto_stage3b.yaml`: the phase-3a config plus voice augmentation (temporal loss present, weight 0),
   from stage-2 step 24,000, 8,000 steps; `STAGE=stage3b` in `train_canto.sbatch`.
+
+## Optional swapped-audio training batches against audio-visual leakage (phase 3c)
+
+Optional and off by default; without it behavior is unchanged.
+
+- `loss_params.swap_audio_p`: share of batches trained with the audio of the other clip in the batch
+  (`musetalk/loss/swap.py`; needs a batch of at least 2 clips and `sync_loss > 0`). In such a batch the real lower
+  half of the face is not a valid target: L1 and the perceptual loss use the upper half only, the feature-matching
+  terms and the temporal loss are skipped, the adversarial terms stay, and the sync loss is computed against the
+  swapped audio with weight `loss_params.swap_sync_loss` (default: `sync_loss`).
+- Purpose: a model trained only on matched audio and video can read part of the mouth movement from the visible upper
+  face; swapped batches make the audio the only source for the mouth.
+- `configs/training/canto_stage3c.yaml`: the phase-3a config plus `swap_audio_p: 0.3`, `swap_sync_loss: 0.1`,
+  from stage-2 step 24,000, 8,000 steps; `STAGE=stage3c` in `train_canto.sbatch`. `tools/check_phase3c.py` checks the helpers.
